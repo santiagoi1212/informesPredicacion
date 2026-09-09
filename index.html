@@ -1,0 +1,828 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Publicadores por Grupo — Informe Mensual</title>
+
+<!--
+  ============================================================================
+  PUBLICADORES POR GRUPO — widget autocontenido
+  ============================================================================
+  Qué hace:
+    - Lee el PADRÓN maestro (una planilla con columnas Grupo/Nombre) que dice
+      a qué grupo (1-5) pertenece cada persona — esa es la fuente de verdad.
+    - Lee las respuestas de las 5 planillas de formulario (una por grupo
+      "físico", pero sus filas se juntan todas y se reasignan al grupo que
+      diga el padrón — así no importa si alguien quedó reorganizado a otro
+      grupo pero sigue llenando el mismo formulario de siempre).
+    - Para el mes seleccionado, muestra por grupo (según el padrón) quién ya
+      se registró y quién falta, y grafica cuántos están como Precursor
+      Regular, Precursor Auxiliar o Publicador.
+
+  Requisito de las planillas:
+    Las 6 planillas (padrón + 5 formularios) pueden quedar PRIVADAS. Los datos
+    se leen a través de un proxy de Google Apps Script (apps-script/Code.gs)
+    que corre con tu cuenta y expone únicamente los ids autorizados en
+    ALLOWED_SHEETS. Desplegalo siguiendo las instrucciones al principio de
+    Code.gs y pegá la URL /exec en API_URL más abajo.
+
+  Cómo integrarlo en otro portal:
+    1) Copiá el <div id="pub-app">…</div> y el bloque <script id="pub-logic">.
+    2) Incluí la librería de CDN (Chart.js) antes de ese script.
+    3) Los estilos están agrupados bajo el prefijo ".pub-" / "#pub-app".
+    4) Para configurar desde el portal anfitrión, definí
+       `window.PUBLICADORES_CONFIG` (las 5 planillas de formulario),
+       `window.PUBLICADORES_ROSTER` (la planilla padrón: {id, gid}) y
+       `window.PUBLICADORES_API_URL` ANTES de que corra este script.
+  ============================================================================
+-->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+<style id="pub-styles">
+  #pub-app {
+    --surface-1:      #fcfcfb;
+    --page-plane:     #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+
+    --series-publicador: #2a78d6;
+    --series-auxiliar:   #eb6834;
+    --series-regular:    #1baf7a;
+
+    --status-good:     #0ca30c;
+    --status-warning:  #fab219;
+    --status-critical: #d03b3b;
+
+    color-scheme: light;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-primary);
+    background: var(--page-plane);
+    line-height: 1.4;
+  }
+  @media (prefers-color-scheme: dark) {
+    #pub-app:not([data-theme="light"]) {
+      --surface-1:      #1a1a19;
+      --page-plane:     #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-publicador: #3987e5;
+      --series-auxiliar:   #d95926;
+      --series-regular:    #199e70;
+      color-scheme: dark;
+    }
+  }
+  #pub-app[data-theme="dark"] {
+    --surface-1:      #1a1a19;
+    --page-plane:     #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-publicador: #3987e5;
+    --series-auxiliar:   #d95926;
+    --series-regular:    #199e70;
+    color-scheme: dark;
+  }
+
+  #pub-app * { box-sizing: border-box; }
+  #pub-app { padding: 20px; max-width: 1180px; margin: 0 auto; }
+  #pub-app h1 { font-size: 1.4rem; margin: 0 0 2px; }
+  #pub-app .pub-sub { color: var(--text-secondary); font-size: 0.85rem; margin: 0 0 18px; }
+
+  .pub-controls {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;
+  }
+  .pub-field { display: flex; flex-direction: column; gap: 3px; font-size: 0.75rem; color: var(--text-secondary); }
+  .pub-field select, .pub-field input {
+    font: inherit; font-size: 0.85rem; padding: 6px 8px; border-radius: 6px;
+    border: 1px solid var(--baseline); background: var(--surface-1); color: var(--text-primary);
+  }
+  .pub-btn {
+    font: inherit; font-size: 0.85rem; padding: 7px 14px; border-radius: 6px;
+    border: 1px solid var(--baseline); background: var(--surface-1); color: var(--text-primary);
+    cursor: pointer; align-self: flex-end;
+  }
+  .pub-btn:hover { border-color: var(--text-secondary); }
+  .pub-btn:disabled { opacity: 0.5; cursor: default; }
+  .pub-status { font-size: 0.78rem; color: var(--text-muted); margin-left: auto; align-self: center; text-align: right; }
+
+  .pub-banners { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+  .pub-banner {
+    font-size: 0.82rem; border-radius: 8px; padding: 9px 12px; border: 1px solid var(--border);
+  }
+  .pub-banner.crit { border-color: var(--status-critical); color: var(--status-critical); }
+  .pub-banner.warn { border-color: var(--status-warning); color: var(--text-primary); background: var(--surface-1); }
+  .pub-banner details summary { cursor: pointer; }
+
+  .pub-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; margin-bottom: 28px; }
+  .pub-card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px 16px;
+  }
+  .pub-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  .pub-card-title {
+    font-size: 1rem; font-weight: 600; border: none; background: transparent; color: var(--text-primary);
+    padding: 2px 4px; border-radius: 4px; width: 60%;
+  }
+  .pub-card-title:hover, .pub-card-title:focus { background: var(--page-plane); outline: none; }
+  .pub-period-tag { font-size: 0.72rem; color: var(--text-muted); }
+
+  .pub-stats { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .pub-chip {
+    font-size: 0.76rem; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);
+    color: var(--text-secondary); white-space: nowrap;
+  }
+  .pub-chip b { color: var(--text-primary); }
+  .pub-chip.good { border-color: var(--status-good); }
+  .pub-chip.warn { border-color: var(--status-warning); }
+  .pub-chip.crit { border-color: var(--status-critical); }
+
+  .pub-section-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); margin: 10px 0 4px; }
+  .pub-names { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pub-name-chip {
+    font-size: 0.78rem; padding: 3px 8px; border-radius: 6px; background: var(--page-plane);
+    border: 1px solid var(--border); color: var(--text-primary);
+    max-width: 100%; overflow-wrap: break-word;
+  }
+  .pub-empty-ok { font-size: 0.82rem; color: var(--status-good); }
+  .pub-mini-chart-wrap { position: relative; height: 130px; margin-top: 12px; }
+
+  .pub-summary { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .pub-summary h2 { font-size: 1.05rem; margin: 0 0 12px; }
+  .pub-charts-row { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; align-items: start; }
+  @media (max-width: 720px) { .pub-charts-row { grid-template-columns: 1fr; } }
+  .pub-chart-box { position: relative; height: 300px; }
+  .pub-note { font-size: 0.74rem; color: var(--text-muted); margin-top: 14px; }
+
+  /* ---- Mobile ---- */
+  @media (max-width: 640px) {
+    #pub-app { padding: 12px; }
+    #pub-app h1 { font-size: 1.15rem; }
+    #pub-app .pub-sub { font-size: 0.8rem; }
+
+    .pub-controls { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px; }
+    .pub-field { width: 100%; }
+    .pub-field select { width: 100%; }
+    .pub-btn { width: 100%; align-self: stretch; }
+    .pub-status { margin-left: 0; text-align: left; }
+
+    .pub-grid { grid-template-columns: 1fr; gap: 12px; }
+    .pub-card { padding: 12px 14px 14px; }
+    .pub-card-head { flex-wrap: wrap; }
+    .pub-card-title { width: 100%; }
+    .pub-period-tag { width: 100%; }
+
+    .pub-chart-box { height: 220px; }
+  }
+</style>
+</head>
+<body>
+<div id="pub-app">
+  <h1>Publicadores por grupo</h1>
+  <p class="pub-sub">Estado de registro mensual y situación (Precursor Regular / Auxiliar / Publicador), por grupo según el padrón.</p>
+
+  <div class="pub-controls">
+    <div class="pub-field">
+      <label for="pub-period">Mes a revisar</label>
+      <select id="pub-period"></select>
+    </div>
+    <button class="pub-btn" id="pub-refresh">↻ Actualizar datos</button>
+    <div class="pub-status" id="pub-status">Cargando…</div>
+  </div>
+
+  <div class="pub-banners" id="pub-banners"></div>
+
+  <div class="pub-grid" id="pub-grid"></div>
+
+  <div class="pub-summary">
+    <h2>Resumen general — situación por grupo</h2>
+    <div class="pub-charts-row">
+      <div class="pub-chart-box"><canvas id="pub-chart-groups"></canvas></div>
+      <div class="pub-chart-box"><canvas id="pub-chart-total"></canvas></div>
+    </div>
+    <p class="pub-note">
+      Los grupos y quién pertenece a cada uno salen del padrón maestro (columnas Grupo/Nombre). Las respuestas de
+      las 5 planillas de formulario se juntan y se emparejan por nombre contra el padrón — así no importa por cuál
+      de las 5 planillas haya respondido cada persona. La coincidencia de nombres tolera errores de tipeo menores;
+      revisá el aviso de "nombres sin coincidencia" si aparece.
+    </p>
+  </div>
+</div>
+
+<script id="pub-logic">
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // 1) CONFIGURACIÓN
+  //    Podés sobreescribir esto desde el portal anfitrión definiendo
+  //    window.PUBLICADORES_CONFIG / window.PUBLICADORES_ROSTER /
+  //    window.PUBLICADORES_API_URL antes de cargar este script.
+  // ---------------------------------------------------------------------
+  var DEFAULT_FORM_SHEETS = [
+    { id: "1-ebPFUI2Ko4z_hRTcYX_RtXFyOpCMnu-LZTIvfSTULY", gid: "898644007" },
+    { id: "1DuBmCR4otIfwdkz6u69KxajK8MBldnkaKVQBDwqOMQk", gid: "898644007" },
+    { id: "1rnH1jBASvggOBdlbSrMENJCEI5XD1eq2Uvn7soJMUL4", gid: "100017995" },
+    { id: "1Tz-YTMSZvOsqhq3RRNAaRd0OvoRoWfzGLdEXqcYw5io", gid: "1118844379" },
+    { id: "1I5EV4UDiMUU9qb9tvG0K0PgoyqQecHC1IN3nstk20-o", gid: "1363353925" }
+  ];
+  var FORM_SHEETS = (window.PUBLICADORES_CONFIG && window.PUBLICADORES_CONFIG.length)
+    ? window.PUBLICADORES_CONFIG
+    : DEFAULT_FORM_SHEETS;
+
+  // Planilla padrón: columnas "Grupo" (número) y "Nombre". Fuente de verdad
+  // de a qué grupo pertenece cada persona.
+  var DEFAULT_ROSTER = { id: "10iAtM2jSdqSOZ6ot0u-OILEm58BrO9dbnK_Lp4ks3qk", gid: "1214544104" };
+  var ROSTER_SHEET = window.PUBLICADORES_ROSTER || DEFAULT_ROSTER;
+
+  // URL /exec de tu implementación de apps-script/Code.gs (ver instrucciones
+  // al principio de ese archivo). Reemplazala por la tuya, o definí
+  // window.PUBLICADORES_API_URL antes de cargar este script.
+  var API_URL = window.PUBLICADORES_API_URL || "https://script.google.com/macros/s/AKfycbyIxXCB7NSnoiR_PI4-UVlGdYjFF_USlRt6R7CKvCOYsm_3Urvs9524tMfM42VvEmg/exec";
+
+  var MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio",
+                "agosto","septiembre","octubre","noviembre","diciembre"];
+
+  // ---------------------------------------------------------------------
+  // 2) UTILIDADES DE TEXTO
+  // ---------------------------------------------------------------------
+  function normalize(s) {
+    return (s == null ? "" : String(s))
+      .normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .toLowerCase().trim().replace(/\s+/g, " ");
+  }
+  var ESCAPE_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return ESCAPE_MAP[c]; });
+  }
+  function titleCase(s) {
+    return s.replace(/\s+/g, " ").trim().split(" ").map(function (w) {
+      return w ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+    }).join(" ");
+  }
+  function monthIndex(raw) {
+    var n = normalize(raw);
+    if (n === "setiembre") return 8;
+    return MONTHS.indexOf(n);
+  }
+  function periodLabel(key) {
+    var year = Math.floor(key / 12), m = key % 12;
+    return titleCase(MONTHS[m]) + " " + year;
+  }
+  function classifySituacion(raw) {
+    var n = normalize(raw);
+    if (!n) return null;
+    if (n.indexOf("regular") !== -1) return "Precursor Regular";
+    if (n.indexOf("auxiliar") !== -1) return "Precursor Auxiliar";
+    if (n.indexOf("publicador") !== -1) return "Publicador";
+    return "Otro";
+  }
+  function levenshtein(a, b) {
+    var m = a.length, n = b.length;
+    if (!m) return n; if (!n) return m;
+    var prev = new Array(n + 1), cur = new Array(n + 1);
+    for (var j = 0; j <= n; j++) prev[j] = j;
+    for (var i = 1; i <= m; i++) {
+      cur[0] = i;
+      for (j = 1; j <= n; j++) {
+        var cost = a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1;
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      }
+      var tmp = prev; prev = cur; cur = tmp;
+    }
+    return prev[n];
+  }
+  // Umbral de similitud tolerante a tipeo, pero conservador (no mezcla
+  // personas distintas con nombres parecidos): crece muy poco con el largo.
+  function fuzzyThreshold(len) { return Math.max(1, Math.min(4, Math.round(0.22 * len))); }
+
+  // true si todos los tokens de "short" aparecen en "long", en el mismo
+  // orden (se permiten tokens de más en el medio) — para casos como
+  // "Teresa Zulueta" adentro de "Teresa Zulueta De Cabrera", o
+  // "Carlos Fernandez" adentro de "Carlos Esteban Fernandez Zamora".
+  function isTokenSubsequence(shortTokens, longTokens) {
+    var i = 0;
+    for (var j = 0; j < longTokens.length && i < shortTokens.length; j++) {
+      if (longTokens[j] === shortTokens[i]) i++;
+    }
+    return i === shortTokens.length;
+  }
+
+  // Busca en el padrón la persona más parecida a normName. Devuelve la
+  // entrada del padrón o null si no hay ninguna lo bastante parecida.
+  function matchRosterName(normName, rosterList) {
+    for (var i = 0; i < rosterList.length; i++) {
+      if (rosterList[i].normName === normName) return rosterList[i];
+    }
+
+    // Nombre acortado/alargado (falta o sobra un nombre del medio o un
+    // apellido de casada) — solo si hay UN único candidato, para no
+    // arriesgar mezclar personas distintas.
+    var inputTokens = normName.split(" ").filter(Boolean);
+    var subseqMatches = [];
+    for (var k = 0; k < rosterList.length; k++) {
+      var rTokens = rosterList[k].normName.split(" ").filter(Boolean);
+      var shorter = inputTokens.length <= rTokens.length ? inputTokens : rTokens;
+      var longer = inputTokens.length <= rTokens.length ? rTokens : inputTokens;
+      if (shorter.length >= 2 && isTokenSubsequence(shorter, longer)) subseqMatches.push(rosterList[k]);
+    }
+    if (subseqMatches.length === 1) return subseqMatches[0];
+
+    var best = null, bestDist = Infinity;
+    for (var j = 0; j < rosterList.length; j++) {
+      var r = rosterList[j];
+      var maxLen = Math.max(normName.length, r.normName.length);
+      var d = levenshtein(normName, r.normName);
+      if (d <= fuzzyThreshold(maxLen) && d < bestDist) { best = r; bestDist = d; }
+    }
+    return best;
+  }
+
+  // ---------------------------------------------------------------------
+  // 3) CARGA Y PARSEO
+  //    Los datos llegan como JSON { header: [...], rows: [[...], ...] }
+  //    desde el proxy de Apps Script (ver apps-script/Code.gs).
+  // ---------------------------------------------------------------------
+  function apiUrl(cfg) {
+    return API_URL + "?id=" + encodeURIComponent(cfg.id) +
+      "&gid=" + encodeURIComponent(cfg.gid) + "&_=" + Date.now();
+  }
+
+  function colFinder(headerNorm) {
+    return function (regex) {
+      for (var i = 0; i < headerNorm.length; i++) if (regex.test(headerNorm[i])) return i;
+      return -1;
+    };
+  }
+
+  function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+  // Los Web Apps de Apps Script (sobre todo ejecutados de forma anónima, con
+  // acceso "Cualquier usuario") a veces devuelven un 404/429/500 esporádico
+  // ante pedidos concurrentes, aunque el deploy esté bien. Reintentamos un
+  // par de veces antes de dar el error por definitivo.
+  var MAX_ATTEMPTS = 3;
+  async function fetchMatrix(cfg) {
+    if (!API_URL || API_URL.indexOf("REEMPLAZA_CON_TU_URL") !== -1) {
+      throw new Error("Falta configurar API_URL con la URL /exec de tu Apps Script (ver apps-script/Code.gs)");
+    }
+    var lastErr;
+    for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        var res = await fetch(apiUrl(cfg), { cache: "no-store" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        var json = await res.json();
+        if (json.error) throw new Error(json.error); // error de la app (no autorizada, etc.) — no reintentar
+        return [json.header].concat(json.rows || []);
+      } catch (e) {
+        lastErr = e;
+        var isNetworkish = /^HTTP \d/.test(e.message) || e.message.indexOf("Failed to fetch") !== -1;
+        if (!isNetworkish || attempt === MAX_ATTEMPTS) throw e;
+        await sleep(400 * attempt);
+      }
+    }
+    throw lastErr;
+  }
+
+  // Filas de una planilla de FORMULARIO (respuestas mensuales).
+  function parseFormRows(matrix) {
+    if (!matrix || !matrix.length) return [];
+    var headerNorm = matrix[0].map(normalize);
+    var find = colFinder(headerNorm);
+    var idx = {
+      timestamp: find(/marca temporal/),
+      name: find(/nombre y apellido/),
+      month: find(/^mes$/),
+      participated: find(/predicacion/),
+      year: find(/^ano$/),
+      situacion: find(/situacion/)
+    };
+    var out = [];
+    for (var i = 1; i < matrix.length; i++) {
+      var row = matrix[i];
+      var rawName = (row[idx.name] == null ? "" : row[idx.name]).toString().trim();
+      if (!rawName) continue; // fila vacía / separador
+      var monthRaw = (row[idx.month] == null ? "" : row[idx.month]).toString();
+      var mIdx = monthIndex(monthRaw);
+      var yearNum = parseInt((row[idx.year] == null ? "" : row[idx.year]).toString().trim(), 10);
+      var situacionRaw = (row[idx.situacion] == null ? "" : row[idx.situacion]).toString().trim();
+      var partNorm = normalize(row[idx.participated]);
+      out.push({
+        rawName: rawName,
+        normName: normalize(rawName),
+        monthIdx: mIdx,
+        year: isNaN(yearNum) ? null : yearNum,
+        participated: partNorm === "si" ? true : (partNorm === "no" ? false : null),
+        situacionBucket: classifySituacion(situacionRaw),
+        periodKey: (mIdx >= 0 && !isNaN(yearNum)) ? (yearNum * 12 + mIdx) : null,
+        grupo: null,          // se completa en matchAllRows()
+        rosterCanonical: null
+      });
+    }
+    return out;
+  }
+
+  // Filas del PADRÓN maestro (columnas Grupo / Nombre).
+  function parseRoster(matrix) {
+    if (!matrix || !matrix.length) return [];
+    var headerNorm = matrix[0].map(normalize);
+    var find = colFinder(headerNorm);
+    var idx = { grupo: find(/^grupo$/), nombre: find(/^nombre$/) };
+    var out = [];
+    var seen = {}; // evita duplicados exactos dentro del padrón
+    for (var i = 1; i < matrix.length; i++) {
+      var row = matrix[i];
+      var rawName = (row[idx.nombre] == null ? "" : row[idx.nombre]).toString().trim();
+      var grupoNum = parseInt(row[idx.grupo], 10);
+      if (!rawName || isNaN(grupoNum)) continue;
+      // "Nombre - nota" (p.ej. "Emma Gerschuni - menor") -> se matchea solo
+      // por la parte antes del guion, pero se muestra el nombre completo.
+      var matchName = rawName.split(/\s+-\s+/)[0].trim();
+      var normMatch = normalize(matchName);
+      if (!normMatch || normMatch === "no publicadora") continue; // fila placeholder, no es una persona
+      var key = grupoNum + "|" + normMatch;
+      if (seen[key]) continue;
+      seen[key] = true;
+      out.push({ grupo: grupoNum, canonical: titleCase(rawName), normName: normMatch });
+    }
+    return out;
+  }
+
+  function groupRosterByGrupo(roster) {
+    var byGroup = {};
+    roster.forEach(function (r) {
+      if (!byGroup[r.grupo]) byGroup[r.grupo] = [];
+      byGroup[r.grupo].push(r);
+    });
+    return byGroup;
+  }
+
+  // ---------------------------------------------------------------------
+  // 4) ESTADO GLOBAL
+  // ---------------------------------------------------------------------
+  var STATE = {
+    roster: [],
+    rosterByGroup: {},
+    rosterStatus: { ok: false, error: null },
+    allFormRows: [],
+    sheetStatus: [],
+    unmatched: [],
+    selectedPeriod: null,
+    loading: false,
+    charts: {}
+  };
+  var NAME_KEY_PREFIX = "pub-group-name-";
+
+  function loadGroupName(grupoNum) {
+    try { return localStorage.getItem(NAME_KEY_PREFIX + grupoNum) || ("Grupo " + grupoNum); }
+    catch (e) { return "Grupo " + grupoNum; }
+  }
+  function saveGroupName(grupoNum, value) {
+    try { localStorage.setItem(NAME_KEY_PREFIX + grupoNum, value); } catch (e) { /* ignore */ }
+  }
+
+  function groupNumbers() {
+    return Object.keys(STATE.rosterByGroup).map(Number).sort(function (a, b) { return a - b; });
+  }
+
+  function allPeriods() {
+    var set = {};
+    STATE.allFormRows.forEach(function (r) { if (r.periodKey != null) set[r.periodKey] = true; });
+    return Object.keys(set).map(Number).sort(function (a, b) { return b - a; });
+  }
+
+  function matchAllRows() {
+    var unmatchedCounts = {};
+    STATE.allFormRows.forEach(function (row) {
+      var m = matchRosterName(row.normName, STATE.roster);
+      row.grupo = m ? m.grupo : null;
+      row.rosterCanonical = m ? m.canonical : null;
+      if (!m) unmatchedCounts[row.rawName] = true;
+    });
+    STATE.unmatched = Object.keys(unmatchedCounts).sort();
+  }
+
+  function computeGroupView(grupoNum, selectedPeriod) {
+    var rosterList = STATE.rosterByGroup[grupoNum] || [];
+    var rosterNames = rosterList.map(function (r) { return r.canonical; }).sort();
+    var latestByPerson = {}; // canonical -> fila del mes elegido (la última gana)
+    STATE.allFormRows.forEach(function (row) {
+      if (row.grupo === grupoNum && row.periodKey === selectedPeriod) {
+        latestByPerson[row.rosterCanonical] = row;
+      }
+    });
+
+    var submitted = [], missing = [], noActivity = [];
+    var counts = { "Precursor Regular": 0, "Precursor Auxiliar": 0, "Publicador": 0, "Otro": 0 };
+    rosterNames.forEach(function (name) {
+      var row = latestByPerson[name];
+      if (row) {
+        submitted.push(name);
+        if (row.participated === false) noActivity.push(name);
+        var bucket = row.situacionBucket || "Otro";
+        counts[bucket] = (counts[bucket] || 0) + 1;
+      } else {
+        missing.push(name);
+      }
+    });
+
+    return { roster: rosterNames, submitted: submitted, missing: missing, noActivity: noActivity, counts: counts };
+  }
+
+  function chip(cls, label, value) {
+    return '<span class="pub-chip ' + cls + '"><b>' + value + '</b> ' + label + '</span>';
+  }
+
+  function renderPeriodSelect() {
+    var sel = document.getElementById("pub-period");
+    var periods = allPeriods();
+    var prevVal = STATE.selectedPeriod;
+    sel.innerHTML = periods.map(function (p) {
+      return '<option value="' + p + '">' + periodLabel(p) + "</option>";
+    }).join("");
+    if (periods.length) {
+      STATE.selectedPeriod = (prevVal != null && periods.indexOf(prevVal) !== -1) ? prevVal : periods[0];
+      sel.value = String(STATE.selectedPeriod);
+    } else {
+      STATE.selectedPeriod = null;
+    }
+  }
+
+  function renderBanners() {
+    var el = document.getElementById("pub-banners");
+    var parts = [];
+    if (!STATE.rosterStatus.ok) {
+      parts.push('<div class="pub-banner crit">⚠ No se pudo cargar el padrón: ' +
+        escapeHtml(STATE.rosterStatus.error || "error desconocido") +
+        '. Sin el padrón no se puede armar la vista por grupo.</div>');
+    }
+    var failedSheets = STATE.sheetStatus.filter(function (s) { return !s.ok; });
+    if (failedSheets.length) {
+      parts.push('<div class="pub-banner warn">⚠ ' + failedSheets.length + ' de ' + STATE.sheetStatus.length +
+        ' planillas de formulario no cargaron — los datos de este mes pueden estar incompletos. Detalle: ' +
+        failedSheets.map(function (s) { return escapeHtml(s.error || "error"); }).join(" · ") + '</div>');
+    }
+    if (STATE.unmatched.length) {
+      parts.push('<div class="pub-banner warn"><details><summary>⚠ ' + STATE.unmatched.length +
+        ' nombre(s) de las planillas no coinciden con nadie del padrón (revisar typos o agregarlos al padrón)</summary>' +
+        '<div class="pub-names" style="margin-top:6px;">' +
+        STATE.unmatched.map(function (n) { return '<span class="pub-name-chip">' + escapeHtml(n) + "</span>"; }).join("") +
+        "</div></details></div>");
+    }
+    el.innerHTML = parts.join("");
+  }
+
+  function seriesColors() {
+    var cs = getComputedStyle(document.getElementById("pub-app"));
+    return {
+      "Publicador": cs.getPropertyValue("--series-publicador").trim(),
+      "Precursor Auxiliar": cs.getPropertyValue("--series-auxiliar").trim(),
+      "Precursor Regular": cs.getPropertyValue("--series-regular").trim(),
+      "Otro": cs.getPropertyValue("--text-muted").trim()
+    };
+  }
+  function inkColors() {
+    var cs = getComputedStyle(document.getElementById("pub-app"));
+    return {
+      text: cs.getPropertyValue("--text-secondary").trim(),
+      grid: cs.getPropertyValue("--gridline").trim(),
+      surface: cs.getPropertyValue("--surface-1").trim()
+    };
+  }
+
+  function destroyChart(key) {
+    if (STATE.charts[key]) { STATE.charts[key].destroy(); delete STATE.charts[key]; }
+  }
+
+  function renderMiniChart(canvasId, counts) {
+    destroyChart(canvasId);
+    var colors = seriesColors(), ink = inkColors();
+    var labels = ["Regular", "Auxiliar", "Publicador"];
+    var keys = ["Precursor Regular", "Precursor Auxiliar", "Publicador"];
+    var data = keys.map(function (k) { return counts[k] || 0; });
+    var bg = keys.map(function (k) { return colors[k]; });
+    var ctx = document.getElementById(canvasId).getContext("2d");
+    STATE.charts[canvasId] = new Chart(ctx, {
+      type: "bar",
+      data: { labels: labels, datasets: [{ data: data, backgroundColor: bg, borderRadius: 4, maxBarThickness: 34 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: true } },
+        scales: {
+          x: { ticks: { color: ink.text, font: { size: 11 } }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { color: ink.text, precision: 0 }, grid: { color: ink.grid } }
+        }
+      }
+    });
+  }
+
+  function renderCard(grupoNum, displayName, view) {
+    var missingHtml = view.missing.length
+      ? '<div class="pub-names">' + view.missing.map(function (n) {
+          return '<span class="pub-name-chip">' + escapeHtml(n) + "</span>";
+        }).join("") + "</div>"
+      : '<div class="pub-empty-ok">✅ Todos los del grupo ya se registraron este mes</div>';
+
+    var noActivityHtml = view.noActivity.length
+      ? '<div class="pub-names">' + view.noActivity.map(function (n) {
+          return '<span class="pub-name-chip">' + escapeHtml(n) + "</span>";
+        }).join("") + "</div>"
+      : "";
+
+    var missingCls = view.missing.length === 0 ? "good" : (view.missing.length <= 2 ? "warn" : "crit");
+    var canvasId = "pub-chart-g" + grupoNum;
+
+    var html =
+      '<div class="pub-card-head">' +
+        '<input class="pub-card-title" id="pub-title-g' + grupoNum + '" value="' + escapeHtml(displayName) + '">' +
+        '<span class="pub-period-tag">' + (STATE.selectedPeriod != null ? periodLabel(STATE.selectedPeriod) : "") + "</span>" +
+      "</div>" +
+      '<div class="pub-stats">' +
+        chip("", "cantidad total", view.roster.length) +
+        chip("good", "registrados", view.submitted.length) +
+        chip(missingCls, "faltan", view.missing.length) +
+      "</div>" +
+      '<div class="pub-section-label">Faltan registrarse' + (STATE.selectedPeriod != null ? " (" + periodLabel(STATE.selectedPeriod) + ")" : "") + "</div>" +
+      missingHtml +
+      (noActivityHtml ? '<div class="pub-section-label">Registraron, sin actividad este mes</div>' + noActivityHtml : "") +
+      '<div class="pub-section-label">Situación' + (STATE.selectedPeriod != null ? " (" + periodLabel(STATE.selectedPeriod) + ")" : "") + "</div>" +
+      '<div class="pub-mini-chart-wrap"><canvas id="' + canvasId + '"></canvas></div>';
+
+    var card = document.getElementById("pub-card-g" + grupoNum);
+    card.innerHTML = html;
+
+    document.getElementById("pub-title-g" + grupoNum).addEventListener("change", function (e) {
+      var val = e.target.value.trim() || ("Grupo " + grupoNum);
+      saveGroupName(grupoNum, val);
+      renderAll(); // recalcula todo, así el gráfico de resumen toma el nombre nuevo
+    });
+
+    renderMiniChart(canvasId, view.counts);
+  }
+
+  function renderSummaryCharts(views, names) {
+    var colors = seriesColors(), ink = inkColors();
+    var keys = ["Precursor Regular", "Precursor Auxiliar", "Publicador"];
+    var labelMap = { "Precursor Regular": "Regular", "Precursor Auxiliar": "Auxiliar", "Publicador": "Publicador" };
+
+    destroyChart("groups");
+    var ctx1 = document.getElementById("pub-chart-groups").getContext("2d");
+    STATE.charts.groups = new Chart(ctx1, {
+      type: "bar",
+      data: {
+        labels: names,
+        datasets: keys.map(function (k) {
+          return {
+            label: labelMap[k],
+            data: views.map(function (v) { return v.counts[k] || 0; }),
+            backgroundColor: colors[k],
+            borderRadius: 4,
+            maxBarThickness: 28
+          };
+        })
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "bottom", labels: { color: ink.text } } },
+        scales: {
+          x: { ticks: { color: ink.text }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { color: ink.text, precision: 0 }, grid: { color: ink.grid } }
+        }
+      }
+    });
+
+    var totals = { "Precursor Regular": 0, "Precursor Auxiliar": 0, "Publicador": 0 };
+    views.forEach(function (v) { keys.forEach(function (k) { totals[k] += v.counts[k] || 0; }); });
+
+    destroyChart("total");
+    var ctx2 = document.getElementById("pub-chart-total").getContext("2d");
+    STATE.charts.total = new Chart(ctx2, {
+      type: "doughnut",
+      data: {
+        labels: keys.map(function (k) { return labelMap[k]; }),
+        datasets: [{ data: keys.map(function (k) { return totals[k]; }), backgroundColor: keys.map(function (k) { return colors[k]; }) }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "bottom", labels: { color: ink.text } } }
+      }
+    });
+  }
+
+  function renderAll() {
+    renderBanners();
+    var grid = document.getElementById("pub-grid");
+    var nums = groupNumbers();
+
+    // Quita tarjetas de grupos que ya no existen en el padrón.
+    Array.prototype.slice.call(grid.children).forEach(function (el) {
+      var num = el.id.replace("pub-card-g", "");
+      if (nums.indexOf(Number(num)) === -1) grid.removeChild(el);
+    });
+
+    if (STATE.selectedPeriod == null || !nums.length) {
+      try { renderSummaryCharts([], []); } catch (e) { /* nada que graficar todavía */ }
+      return;
+    }
+
+    var views = [], names = [];
+    nums.forEach(function (grupoNum) {
+      if (!document.getElementById("pub-card-g" + grupoNum)) {
+        var el = document.createElement("div");
+        el.className = "pub-card";
+        el.id = "pub-card-g" + grupoNum;
+        grid.appendChild(el);
+      }
+      var displayName = loadGroupName(grupoNum);
+      var view = computeGroupView(grupoNum, STATE.selectedPeriod);
+      views.push(view);
+      names.push(displayName);
+      try { renderCard(grupoNum, displayName, view); }
+      catch (err) { console.error("Error renderizando grupo", grupoNum, err); }
+    });
+
+    try { renderSummaryCharts(views, names); }
+    catch (err) { console.error("Error renderizando gráficos de resumen", err); }
+  }
+
+  function setStatus(text) { document.getElementById("pub-status").textContent = text; }
+
+  async function loadAll() {
+    if (STATE.loading) return;
+    STATE.loading = true;
+    var refreshBtn = document.getElementById("pub-refresh");
+    refreshBtn.disabled = true;
+    try {
+      setStatus("Cargando padrón…");
+      try {
+        var rosterMatrix = await fetchMatrix(ROSTER_SHEET);
+        STATE.roster = parseRoster(rosterMatrix);
+        STATE.rosterStatus = { ok: true, error: null };
+      } catch (e) {
+        STATE.roster = [];
+        STATE.rosterStatus = { ok: false, error: e.message || "No se pudo cargar" };
+      }
+      STATE.rosterByGroup = groupRosterByGrupo(STATE.roster);
+
+      STATE.allFormRows = [];
+      STATE.sheetStatus = FORM_SHEETS.map(function (cfg) { return { cfg: cfg, ok: false, error: null }; });
+      for (var i = 0; i < FORM_SHEETS.length; i++) {
+        setStatus("Cargando planilla de formulario " + (i + 1) + "/" + FORM_SHEETS.length + "…");
+        try {
+          var m = await fetchMatrix(FORM_SHEETS[i]);
+          STATE.allFormRows = STATE.allFormRows.concat(parseFormRows(m));
+          STATE.sheetStatus[i].ok = true;
+        } catch (e) {
+          STATE.sheetStatus[i].error = e.message || "No se pudo cargar";
+        }
+        if (i < FORM_SHEETS.length - 1) await sleep(250);
+      }
+
+      matchAllRows();
+      renderPeriodSelect();
+      renderAll();
+
+      var okSheets = STATE.sheetStatus.filter(function (s) { return s.ok; }).length;
+      setStatus("Actualizado " + new Date().toLocaleTimeString("es-UY") +
+        " · padrón " + (STATE.rosterStatus.ok ? "ok" : "ERROR") +
+        " · " + okSheets + "/" + FORM_SHEETS.length + " planillas");
+    } finally {
+      STATE.loading = false;
+      refreshBtn.disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // 5) EVENTOS
+  // ---------------------------------------------------------------------
+  document.getElementById("pub-period").addEventListener("change", function (e) {
+    STATE.selectedPeriod = Number(e.target.value);
+    renderAll();
+  });
+  document.getElementById("pub-refresh").addEventListener("click", loadAll);
+
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
+      renderAll(); // recalcula colores de los gráficos con el nuevo tema
+    });
+  }
+
+  loadAll();
+})();
+</script>
+</body>
+</html>
